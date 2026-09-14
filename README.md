@@ -94,6 +94,3 @@ DHCP_END="192.168.50.100"
 - Certains drivers ne respectent pas toujours le canal demandé par `aireplay-ng` — vérifiez avec `iw dev <iface> info`.
 - La création d'AP nécessite que la carte supporte le mode AP (`iw list` → `Supported interface modes`).
 
-## Licence
-
-MIT — voir [LICENSE](LICENSE).
