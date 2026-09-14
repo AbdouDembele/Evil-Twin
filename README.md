@@ -1,8 +1,7 @@
 # Evil Twin Lab
 
-Script Bash interactif (`evil-twin.sh`) pour monter un laboratoire Wi-Fi de test : activation du mode monitor, scan de réseaux, tests de désauthentification, et création d'un point d'accès (AP) factice avec DHCP/DNS pour observer le trafic client.
+Script Bash interactif (`evil-twin.sh`) clone un wifi existant et déconnecte tous ses utilisateurs pour faire du MITM et dns spoofing. 
 
-Conçu pour l'apprentissage de la sécurité Wi-Fi (audits, formation, CTF, home-lab) **sur du matériel et des réseaux que vous possédez ou que vous êtes explicitement autorisé à tester**.
 
 ## Fonctionnalités
 
@@ -59,7 +58,7 @@ Le script affiche un menu interactif :
 | 7 | Voir les clients connectés |
 | 8 | Voir les logs clients |
 | 9 | Voir les logs réseau |
-| 10 | Configurer une redirection DNS / DNS SPOOFING | MITM
+| 10 | Configurer une redirection DNS |
 | 11 | Voir les redirections DNS |
 | 12 | Arrêter l'AP |
 | 0 | Quitter |
@@ -75,6 +74,51 @@ Le script affiche un menu interactif :
 7. **7 / 8 / 9** – Observer les clients et le trafic DNS
 
 En quittant le menu (option **0**) ou avec **Ctrl+C**, le script nettoie automatiquement : arrêt de `hostapd`/`dnsmasq`, suppression des règles iptables, retour de la carte en mode managed, redémarrage de NetworkManager.
+
+## DNS spoofing & MITM : comment ça marche
+
+Une fois l'AP de laboratoire actif (option 6), le script se trouve en position de **man-in-the-middle** naturel : tout appareil qui se connecte à ce point d'accès route obligatoirement son trafic à travers la machine qui exécute le script. C'est cette position réseau qui rend le DNS spoofing possible — aucune manipulation ARP supplémentaire n'est nécessaire puisque la machine *est* la passerelle et le résolveur DNS du client.
+
+### Le chemin du trafic
+
+```
+Client Wi-Fi → AP (hostapd) → dnsmasq (DHCP + DNS) → iptables NAT → Internet
+```
+
+1. **`hostapd`** diffuse le SSID ciblé et accepte les connexions Wi-Fi.
+2. **`dnsmasq`** répond aux requêtes DHCP (`dhcp-option=6,$AP_IP` dans la config) : chaque client reçoit `AP_IP` (`192.168.50.1`) comme serveur DNS. Le client ne choisit rien — il fait confiance à l'AP.
+3. Toute requête DNS du client arrive donc directement à `dnsmasq`, qui consulte d'abord ses propres règles avant de relayer vers les résolveurs upstream (`server=8.8.8.8`, `server=1.1.1.1` dans `DNSMASQ_CONF`).
+4. **`iptables`** (MASQUERADE + FORWARD) laisse passer le reste du trafic normalement vers Internet, pour ne pas éveiller de soupçons sur une connexion qui semble fonctionner.
+
+### Le spoofing lui-même
+
+La fonction `configure_dns_redirect` (option 10) écrit une ligne dans `DNS_REDIRECT_CONF`, inclus par référence dans la config principale :
+
+```
+conf-file=$DNS_REDIRECT_CONF
+```
+
+Chaque redirection ajoutée prend la forme :
+
+```
+address=/exemple.com/192.168.1.1
+```
+
+C'est la directive `address=` de dnsmasq : toute requête `A`/`AAAA` pour ce domaine (et ses sous-domaines) reçoit directement l'IP indiquée, **sans jamais interroger les serveurs upstream**. dnsmasq est rechargé à chaud après chaque ajout (kill + relance sur `DNSMASQ_PID`), donc la redirection est active immédiatement pour les nouvelles requêtes.
+
+Concrètement, si un client tape `exemple.com` dans son navigateur, sa requête DNS ne quitte jamais la machine du lab — elle est interceptée et répondue localement, redirigeant le client vers n'importe quel serveur que vous contrôlez (page de capture, portail de démonstration, etc.).
+
+### Visibilité du trafic
+
+- **`show_network_logs` (option 9)** parse `DNS_LOG` (`log-queries` activé dans la config dnsmasq) et affiche chaque requête sous la forme `client → domaine demandé`, ce qui permet d'observer en clair tous les noms de domaine consultés par les clients connectés — même ceux qui ne sont pas redirigés.
+- **`show_clients` (option 7)** croise `iw station dump` et les baux DHCP (`/var/lib/misc/dnsmasq.leases`) pour associer MAC, IP et hostname de chaque appareil connecté.
+
+### Pourquoi ça fonctionne (et ses limites)
+
+- Ça fonctionne parce que le DNS en clair (UDP/53, sans DoH/DoT) fait confiance au premier résolveur qui répond, sans vérification cryptographique.
+- **HTTPS n'est pas cassé par cette technique seule** : rediriger un domaine vers une IP différente donne un avertissement de certificat si le client tente une connexion TLS normale, sauf si un serveur avec un certificat valide pour ce domaine répond à cette IP (ce qui nécessite un CA compromis ou une PKI de lab installée sur les appareils clients).
+- Un client utilisant **DNS sur HTTPS (DoH)** ou **DNS sur TLS (DoT)**, ou un résolveur codé en dur (ex. `1.1.1.1` configuré manuellement dans le navigateur), contourne entièrement ce spoofing puisque ses requêtes DNS ne passent plus par `dnsmasq`.
+- La technique complète (AP usurpant un SSID légitime + deauth pour forcer la reconnexion + DNS spoofing) est précisément ce qu'on appelle une attaque **Evil Twin** : elle repose sur le fait que la plupart des appareils se reconnectent automatiquement à un SSID connu sans vérifier l'identité cryptographique du point d'accès (WPA2/3-Personal n'authentifie pas l'AP auprès du client, seulement le contraire).
 
 ## Configuration
 
